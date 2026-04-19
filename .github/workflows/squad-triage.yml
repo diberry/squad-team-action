@@ -18,21 +18,25 @@ jobs:
         id: details
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          ISSUE_JSON=$(gh issue view "${{ github.event.issue.number }}" --json title,body,labels)
+          ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json title,body,labels)
           TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
           BODY=$(echo "$ISSUE_JSON" | jq -r '.body // ""')
           COMBINED="${TITLE} ${BODY}"
-          echo "text=${COMBINED}" >> "$GITHUB_OUTPUT"
+
+          # Use EOF delimiter for multiline-safe output
+          echo "text<<GHEOF" >> "$GITHUB_OUTPUT"
+          echo "$COMBINED" >> "$GITHUB_OUTPUT"
+          echo "GHEOF" >> "$GITHUB_OUTPUT"
 
       - name: Route to team member
         id: route
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TEXT: ${{ steps.details.outputs.text }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          TEXT="${{ steps.details.outputs.text }}"
-          TEXT_LOWER=$(echo "$TEXT" | tr '[:upper:]' '[:lower:]')
-          ISSUE_NUM="${{ github.event.issue.number }}"
+          TEXT_LOWER=$(echo "$ISSUE_TEXT" | tr '[:upper:]' '[:lower:]')
           ROUTED=""
 
           # Read routing rules from .squad/routing.md patterns
@@ -62,19 +66,20 @@ jobs:
       - name: Apply member label
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MEMBER: ${{ steps.route.outputs.member }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          MEMBER="${{ steps.route.outputs.member }}"
-          ISSUE_NUM="${{ github.event.issue.number }}"
-          gh issue edit "$ISSUE_NUM" --add-label "squad:${MEMBER}" 2>/dev/null || \
-            gh label create "squad:${MEMBER}" --color "0E8A16" --description "Squad member: ${MEMBER}" && \
-            gh issue edit "$ISSUE_NUM" --add-label "squad:${MEMBER}"
+          # Create label if it doesn't exist, then apply it
+          gh label create "squad:${MEMBER}" --color "0E8A16" --description "Squad member: ${MEMBER}" 2>/dev/null || true
+          gh issue edit "$ISSUE_NUMBER" --add-label "squad:${MEMBER}"
 
       - name: Post triage comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MEMBER: ${{ steps.route.outputs.member }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          MEMBER="${{ steps.route.outputs.member }}"
-          gh issue comment "${{ github.event.issue.number }}" --body "### 🏷️ Squad Triage
+          gh issue comment "$ISSUE_NUMBER" --body "### 🏷️ Squad Triage
 
           This issue has been routed to **${MEMBER}** based on keyword analysis.
 

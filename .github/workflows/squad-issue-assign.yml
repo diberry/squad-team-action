@@ -18,8 +18,9 @@ jobs:
 
       - name: Extract member name
         id: member
+        env:
+          LABEL: ${{ github.event.label.name }}
         run: |
-          LABEL="${{ github.event.label.name }}"
           MEMBER="${LABEL#squad:}"
           echo "name=${MEMBER}" >> "$GITHUB_OUTPUT"
           echo "Assigned member: ${MEMBER}"
@@ -27,23 +28,27 @@ jobs:
       - name: Post assignment comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MEMBER: ${{ steps.member.outputs.name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          MEMBER="${{ steps.member.outputs.name }}"
-          gh issue comment "${{ github.event.issue.number }}" --body "### 📋 Squad Assignment
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+          gh issue comment "$ISSUE_NUMBER" --body "### 📋 Squad Assignment
 
           **${MEMBER}** has been assigned to this issue.
 
           | Detail | Value |
           |--------|-------|
           | Member | ${MEMBER} |
-          | Issue  | #${{ github.event.issue.number }} |
-          | Time   | $(date -u '+%Y-%m-%d %H:%M UTC') |
+          | Issue  | #${ISSUE_NUMBER} |
+          | Time   | ${TIMESTAMP} |
 
           Work will begin shortly."
 
       - name: Check for @copilot auto-assign
         env:
-          GH_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MEMBER: ${{ steps.member.outputs.name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           # Check if copilot-auto-assign is enabled in team.md
           TEAM_FILE=".squad/team.md"
@@ -52,12 +57,10 @@ jobs:
           fi
 
           if [ -f "$TEAM_FILE" ] && grep -q 'copilot-auto-assign: true' "$TEAM_FILE"; then
-            MEMBER="${{ steps.member.outputs.name }}"
-
             # Only auto-assign @copilot for developer-type roles
             if echo "$MEMBER" | grep -qiE '(developer|dev|coder|engineer)'; then
               echo "Auto-assigning @copilot for developer role: ${MEMBER}"
-              gh issue comment "${{ github.event.issue.number }}" --body "Assigning @copilot to implement changes for this issue." || true
+              gh issue comment "$ISSUE_NUMBER" --body "Assigning @copilot to implement changes for this issue." || true
             fi
           else
             echo "Copilot auto-assign not enabled in team config"

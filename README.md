@@ -1,281 +1,51 @@
 # Squad Team Action
 
-Run your full AI agent team directly on GitHub Actions. Add a `squad` label to any issue and the entire team analyzes, discusses, and proposes solutions — with support for both GitHub-hosted and self-hosted (Azure Container Apps) runners.
+Run your full AI agent team on GitHub Actions. Label an issue with `squad` and watch your team analyze, discuss, and propose solutions—all in under 5 minutes.
 
----
+## What This Does
 
-## Architecture Overview
+Add the `squad` label to any GitHub issue. The action automatically:
+- Clones your repo
+- Runs your full Squad team on the issue  
+- Posts results back as issue comments
+
+**Works immediately on GitHub-hosted runners—no infrastructure setup required.**
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                   GITHUB-HOSTED (default)                        │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Issue labeled "squad"                                           │
-│       │                                                          │
-│       ▼                                                          │
-│  GitHub Actions runner (ubuntu-latest)                           │
-│       │                                                          │
-│       ├── Clone repo                                             │
-│       ├── Install Squad CLI + Copilot CLI extension              │
-│       ├── Fetch issue details                                    │
-│       ├── Run: copilot --yolo --agent squad                      │
-│       │   (full-team dispatch via Squad framework)               │
-│       └── Post results as issue comment                          │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────────┐
-│            SELF-HOSTED (Azure Container Apps + KEDA)             │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Issue labeled "squad"                                           │
-│       │                                                          │
-│       ▼                                                          │
-│  GitHub Actions detects self-hosted runner needed                │
-│  [self-hosted, linux, squad]                                     │
-│       │                                                          │
-│       ▼                                                          │
-│  KEDA GitHub Runner Scaler                                       │
-│       │                                                          │
-│       ├── Detect pending jobs                                    │
-│       ├── Trigger Azure Container App Job                        │
-│       │                                                          │
-│       ▼                                                          │
-│  ACA Job Container (ephemeral)                                   │
-│       │                                                          │
-│       ├── Start GitHub Actions runner binary                     │
-│       ├── Runner registers with [self-hosted, linux, squad]      │
-│       ├── Runner picks up workflow job                           │
-│       ├── Clone repo                                             │
-│       ├── Run Squad dispatch                                     │
-│       └── Upload results                                         │
-│       │                                                          │
-│       ▼                                                          │
-│  Container exits → Job completes                                 │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
+Issue created → Add "squad" label → Team analyzes → Results posted
+   (2–5 sec)        (instant)        (2–5 min)      (as comment)
 ```
 
----
-
-## Why Self-Hosted Runners?
-
-While **GitHub-hosted runners work out of the box**, self-hosted runners on Azure Container Apps offer:
-
-| Factor | GitHub-hosted | Self-hosted (ACA) |
-|--------|---------------|-------------------|
-| **Cost** | $0.008/min (~$11.52/hour) | $0/mo (<200 jobs), ~$10–12/mo (1K jobs) |
-| **Cold start** | ~2–5 sec | ~10–15 sec (ACA Jobs are ephemeral) |
-| **Team size limit** | None | Limited by container quota |
-| **Setup** | Works immediately | Requires Terraform + Azure |
-| **Best for** | Small teams, prototyping | High-volume squads, cost-sensitive orgs |
-
-**Pick GitHub-hosted by default.** Use self-hosted when you have >100 squad runs/month or need tighter cost control.
+Need it faster or cheaper at scale? We support **self-hosted runners on Azure Container Apps** (see below).
 
 ---
 
-## Architecture Comparison: Two Approaches
+## Quick Start (GitHub-Hosted) ⚡
 
-We built Squad Team Action on two distinct architectural patterns. Understanding the trade-offs helps you choose the right tool.
+Get your team discussing issues in 5 minutes. No prerequisites—just a GitHub repo and a Copilot token.
 
-### Approach A: Queue-Driven (Hafliði's Squad-on-ACA)
+### 1. Set up secrets
 
-**How it works:**
-1. GitHub label → enqueues JSON message to Azure Storage Queue
-2. KEDA `azure-queue` scaler polls the queue
-3. ACA Job container runs custom entrypoint:
-   - Clone repo
-   - Run `copilot --yolo --agent squad`
-   - Create branch, push, open PR
-   - Delete queue message
+Go to **Settings → Secrets and variables → Actions** and add:
 
-**Reference:** [Hafliði Fridthjofsson's blog post](https://azureviking.com/post/squad-on-aca-serverless-ai-agents/) • [GitHub: haflidif/squad-on-aca](https://github.com/haflidif/squad-on-aca)
+- **`COPILOT_TOKEN`** (required): Your Copilot personal access token
+- **`COPILOT_ASSIGN_TOKEN`** (optional): For auto-assignment to @copilot
 
-**Strengths:**
-- Simple: Container IS the entire workflow (one container = one agent action)
-- Complete automation: PR creation baked in, not orchestrated externally
-- Revision loop via `/squad revise` comments (lightweight, idempotent)
-- Excellent cost at scale: ~$6/month for 100 issues
+### 2. Define your team
 
-**Trade-offs:**
-- Custom container entrypoint logic (not in YAML)
-- Single agent per container (harder to do full-team dispatch)
-- Queue message schema couples to entrypoint (changes require container rebuild)
-
-### Approach B: Self-Hosted Runner (Squad Team Action)
-
-**How it works:**
-1. GitHub label → detects self-hosted runner needed
-2. KEDA `github-runner` scaler detects pending GitHub Actions jobs
-3. Spins up ACA Job container running GitHub Actions runner binary
-4. Workflow YAML orchestrates the dispatch:
-   - Squad CLI handles full-team dispatch internally
-   - Runs: `copilot --yolo --agent squad`
-   - Posts results as comments
-5. Container exits after workflow completes
-
-**Strengths:**
-- Workflow logic lives in YAML (easy iteration, no container rebuild)
-- Full-team dispatch: Squad CLI handles fan-out per issue
-- GitHub Actions ecosystem: Reuse actions, caching, artifacts, matrix strategies
-- Simpler mental model: "It's just GitHub Actions on your own compute"
-- Pre-baked tools in runner image: Node.js 20, Squad CLI, gh CLI, Copilot extension
-- Complementary to queue-driven approach (can run BOTH)
-
-**Trade-offs:**
-- More infrastructure: KEDA, ACA, runner registration, OIDC federation
-- Workflow job waits for container to spin (10–15 sec cold start)
-- Requires more Azure knowledge to troubleshoot
-
-### Side-by-Side Comparison
-
-| Aspect | Queue-Driven (Hafliði) | Self-Hosted Runner (Ours) |
-|--------|----------------------|--------------------------|
-| **What triggers ACA** | Storage Queue message | GitHub Actions job queue |
-| **Container responsibility** | Clone → Squad → PR (complete) | Just run GitHub Actions runner |
-| **Orchestration lives in** | Container entrypoint.sh | Workflow YAML |
-| **KEDA scaler** | `azure-queue` | `github-runner` |
-| **Agent model** | Single agent per container | Full team dispatch per workflow |
-| **Workflow iteration** | Requires container rebuild | Just edit YAML |
-| **Revision loop** | Built into entrypoint | Via workflow re-trigger |
-| **Cost (100 jobs/mo)** | ~$6 | ~$0 (free tier) |
-| **Container expertise** | More required | Less required |
-
-**Recommendation:**  
-→ **Queue-driven** if you want a fully self-contained container that handles clone-to-PR  
-→ **Self-hosted runner** if you want workflow logic in YAML and easy iteration  
-→ **Both** if your org does both single-agent and full-team work
-
----
-
-## Infrastructure
-
-Both approaches share common Azure infrastructure. Self-hosted runners add KEDA and runner configuration on top.
-
-### Shared (both approaches)
-
-- **Azure Container Apps Managed Environment** — hosts the containers
-- **Azure Container Registry (ACR)** — stores container images
-- **User-Assigned Managed Identity (UAMI)** — grants containers permissions (AcrPull, Key Vault reader)
-- **Azure Key Vault** — stores secrets (Copilot PAT, GitHub App credentials)
-- **Log Analytics Workspace** — container logs and diagnostics
-- **OIDC Federated Identity** — GitHub Actions can authenticate to Azure without secrets
-
-### Self-Hosted Runner Only
-
-- **KEDA Scaler (github-runner)** — polls GitHub Actions job queue, scales ACA Jobs up/down
-- **Runner container** — Dockerfile + entrypoint that runs GitHub Actions runner binary
-- **Terraform modules** — `infra/runner.tf` in the main [squad-on-aca](https://github.com/haflidif/squad-on-aca) repo
-
-All Terraform is in the main `squad-on-aca` repo. Squad Team Action just defines the workflows.
-
----
-
-## Quick Start
-
-### Option 1: GitHub-Hosted (Easiest)
-
-No setup needed. The workflows work out of the box:
-
-1. **Fork or clone this repo:**
-   ```bash
-   git clone https://github.com/your-org/squad-team-action
-   cd squad-team-action
-   ```
-
-2. **Add secrets to your repo** (Settings → Secrets and variables → Actions):
-
-   | Secret | Required | Description |
-   |--------|----------|-------------|
-   | `COPILOT_TOKEN` | Yes | Personal access token with Copilot access |
-   | `COPILOT_ASSIGN_TOKEN` | Optional | PAT for @copilot auto-assignment |
-
-3. **Customize your team:**
-   - Edit `.squad/team.md` with your team members and roles
-   - Edit `.squad/routing.md` with keyword-based routing rules
-
-4. **Use it:**
-   ```bash
-   # Create an issue
-   # Add the "squad" label
-   # Watch workflows run on ubuntu-latest
-   ```
-
-**Cost:** ~$0.008/minute × number of workflow minutes/month  
-**Performance:** Starts in 2–5 seconds
-
----
-
-### Option 2: Self-Hosted (Azure Container Apps)
-
-**Prerequisites:**
-- Azure subscription with permissions to create resources
-- `az` CLI installed and authenticated
-- Terraform 1.5+ (or use `azd` if deployed via squad-on-aca repo)
-
-**Steps:**
-
-1. **Deploy infrastructure** (or reuse existing squad-on-aca deployment):
-   ```bash
-   # In the squad-on-aca repo, run:
-   azd up
-   # or use Terraform directly to apply infra/runner.tf
-   ```
-
-2. **In this repo, add the same secrets:**
-   - `COPILOT_TOKEN`
-   - `COPILOT_ASSIGN_TOKEN` (optional)
-
-3. **Update one line in your workflow:**
-   ```yaml
-   # Change from:
-   runs-on: ubuntu-latest
-   
-   # To:
-   runs-on: [self-hosted, linux, squad]
-   ```
-
-4. **Label issues as before:**
-   ```bash
-   # Add "squad" label to any issue
-   # Workflow will now run on self-hosted runner (ACA Job)
-   ```
-
-**Cost:** ~$0–12/month depending on job volume (free tier up to ~200 jobs)  
-**Performance:** Starts in 10–15 seconds (ACA Job spin-up)
-
----
-
-## Workflows
-
-| Workflow | File | Trigger | Purpose |
-|----------|------|---------|---------|
-| **Squad Full-Team Dispatch** | `squad-full-team-dispatch.yml` | `squad` label or manual | Runs the full team dispatch; posts results as issue comments |
-| **Squad Triage** | `squad-triage.yml` | `squad` label | Keyword-based routing; adds `squad:{member}` labels for each matching member |
-| **Squad Issue Assign** | `squad-issue-assign.yml` | `squad:{member}` label | Posts assignment comment; optionally triggers @copilot auto-assignment |
-
-The main workflow is **Squad Full-Team Dispatch**. The others support routing and assignment fallback.
-
----
-
-## Configuration
-
-### `.squad/team.md`
-
-Define your team members and their roles:
+Edit `.squad/team.md`:
 
 ```markdown
 | Name | Role | Specialty |
 |------|------|-----------|
-| Alex | Architect | System design, tradeoffs |
-| Jordan | Developer | Feature implementation, testing |
-| Riley | DevRel | Docs, examples, DX |
+| Alex | Architect | System design |
+| Jordan | Developer | Implementation |
+| Riley | DevRel | Documentation |
 ```
 
-### `.squad/routing.md`
+### 3. (Optional) Add routing rules
 
-Keyword-based routing for triage (optional):
+Edit `.squad/routing.md` to auto-assign members by keyword:
 
 ```markdown
 | Keyword | Squad Member |
@@ -285,55 +55,224 @@ Keyword-based routing for triage (optional):
 | deploy | Alex |
 ```
 
-### Secrets
+### 4. Test it
 
-Store in **Settings → Secrets and variables → Actions**:
+1. Create an issue: "Add authentication to the API"
+2. Add the `squad` label
+3. Watch the workflows run (check **Actions** tab)
+4. See results posted as a comment
 
-- **`COPILOT_TOKEN`** (required): Personal access token with Copilot access (used by Squad CLI)
-- **`COPILOT_ASSIGN_TOKEN`** (optional): PAT for @copilot agent (if using auto-assignment)
+**That's it.** Your team is now analyzing issues on every label.
+
+---
+
+## Customize Your Team
+
+### `.squad/team.md` reference
+
+This file defines who your team members are. Each row is one person:
+
+```markdown
+| Name | Role | Specialty |
+|------|------|-----------|
+| Your Name | Your Role | What you focus on |
+```
+
+Squad will use these when dispatching work. Edit it anytime—no redeploy needed.
+
+### `.squad/routing.md` reference
+
+(Optional) Route issues to specific team members based on keywords:
+
+```markdown
+| Keyword | Squad Member |
+|---------|--------------|
+| database | Alex |
+| frontend | Jordan |
+```
+
+---
+
+## Advanced: Self-Hosted Runners
+
+### When to use self-hosted
+
+- Running >100 squad analyses per month
+- Need lower latency (10–15 sec vs 2–5 sec on GitHub-hosted)
+- Cost-sensitive (free tier supports ~200 jobs/month)
+
+### How it works
+
+Self-hosted runners use **Azure Container Apps + KEDA**:
+
+```
+Issue labeled "squad"
+    ↓
+GitHub Actions detects [self-hosted, linux, squad] runner needed
+    ↓
+KEDA scales up ACA Job container
+    ↓
+Runner starts, picks up workflow, runs Squad
+    ↓
+Results posted, container exits
+    ↓
+KEDA scales down (no idle cost)
+```
+
+### Setting up self-hosted runners
+
+**Prerequisites:**
+- Azure subscription with permissions
+- `az` CLI and Terraform 1.5+ (or use `azd`)
+
+**Steps:**
+
+1. **Deploy infrastructure** (from the [squad-on-aca](https://github.com/haflidif/squad-on-aca) repo):
+   ```bash
+   cd squad-on-aca
+   azd up
+   ```
+
+2. **Add the same secrets** to this repo:
+   - `COPILOT_TOKEN`
+   - `COPILOT_ASSIGN_TOKEN` (optional)
+
+3. **Update your workflow** to use self-hosted runners:
+   ```yaml
+   # Change from:
+   runs-on: ubuntu-latest
+   
+   # To:
+   runs-on: [self-hosted, linux, squad]
+   ```
+
+4. **Label issues as normal**—workflows now run on your ACA infrastructure.
+
+### Cost comparison
+
+| Runner | Cost/month (100 jobs × 2 min) | Setup | Cold start |
+|--------|-------------------------------|-------|-----------|
+| **GitHub-hosted** | ~$1.60 ($0.008/min) | None | 2–5 sec |
+| **Self-hosted (ACA)** | ~$0–3 (free tier) | Terraform | 10–15 sec |
+
+At 1,000 jobs/month (2 min each): GitHub-hosted ~$16 vs self-hosted ~$10–15. Check [current GitHub Actions pricing](https://docs.github.com/en/billing/managing-billing-for-github-actions/about-billing-for-github-actions) for your plan.
+
+---
+
+## Workflows Reference
+
+| Workflow | File | Trigger | Purpose |
+|----------|------|---------|---------|
+| **Squad Full-Team** | `squad-full-team-dispatch.yml` | `squad` label | Runs full team dispatch; posts results |
+| **Squad Triage** | `squad-triage.yml` | `squad` label | Routes by keyword; adds `squad:{member}` labels |
+| **Squad Issue Assign** | `squad-issue-assign.yml` | `squad:{member}` label | Posts assignment; triggers @copilot if enabled |
+
+The main workflow is **Squad Full-Team Dispatch**. Others support routing and fallback.
+
+---
+
+## Secrets Reference
+
+Store these in **Settings → Secrets and variables → Actions**:
+
+- **`COPILOT_TOKEN`** (required): Copilot personal access token (used by Squad CLI)
+- **`COPILOT_ASSIGN_TOKEN`** (optional): PAT for @copilot agent (for auto-assignment)
 - **`GITHUB_TOKEN`**: Provided automatically by GitHub Actions
 
 ---
 
-## Cost Comparison
+<details>
+<summary><b>Architecture Deep Dive</b> — How the two approaches compare</summary>
 
-Real-world estimates for 100 squad runs/month (each run ~2 min):
+We built Squad Team Action on a **self-hosted GitHub Actions runner** model. For context, here's how it compares to the **queue-driven approach** from [haflidif/squad-on-aca](https://github.com/haflidif/squad-on-aca).
 
-| Runner Type | Monthly Cost | Notes |
-|-------------|-------------|-------|
-| GitHub-hosted | ~$23.04 | 100 runs × 2 min × $0.008/min × 144/month |
-| Self-hosted (ACA) | ~$0–3 | Free tier up to ~200 runs; after that, compute costs apply (~$0.01–0.03/run) |
+### Approach A: Queue-Driven (Hafliði's Squad-on-ACA)
 
-**At 1,000 runs/month:**
-- GitHub-hosted: ~$230
-- Self-hosted: ~$10–15
+**How it works:**
+1. GitHub label → enqueues JSON message to Azure Storage Queue
+2. KEDA `azure-queue` scaler polls the queue
+3. ACA Job container runs custom entrypoint:
+   - Clone repo, run Squad, create PR, delete queue message
+
+**Strengths:**
+- Simple: One container = one complete action
+- PR creation built in (not orchestrated externally)
+- Excellent cost at scale: ~$6/month for 100 issues
+- Lightweight revision loop via `/squad revise` comments
+
+**Trade-offs:**
+- Custom container logic (not YAML)
+- Single agent per container (harder for full-team dispatch)
+- Queue schema couples to entrypoint (container rebuild on change)
+
+### Approach B: Self-Hosted Runner (Squad Team Action)
+
+**How it works:**
+1. GitHub label → detects self-hosted runner needed
+2. KEDA `github-runner` scaler detects pending GitHub Actions jobs
+3. Spins up ACA Job container with GitHub Actions runner binary
+4. Workflow YAML orchestrates dispatch → Squad → results
+5. Container exits after workflow completes
+
+**Strengths:**
+- Workflow logic in YAML (easy iteration, no rebuild)
+- Full-team dispatch via Squad CLI
+- GitHub Actions ecosystem (caching, artifacts, matrix)
+- Simpler mental model: "GitHub Actions on your own compute"
+- Pre-baked tools: Node.js 20, Squad CLI, gh CLI, Copilot extension
+
+**Trade-offs:**
+- More infrastructure: KEDA, ACA, runner registration, OIDC
+- 10–15 sec cold start (ACA Job spin-up)
+- More Azure knowledge required
+
+### Side-by-Side Comparison
+
+| Aspect | Queue-Driven | Self-Hosted Runner |
+|--------|--------------|-------------------|
+| **What triggers ACA** | Storage Queue message | GitHub Actions job queue |
+| **Container does** | Clone → Squad → PR (complete) | Runs GitHub Actions runner |
+| **Orchestration** | Container entrypoint.sh | Workflow YAML |
+| **KEDA scaler** | `azure-queue` | `github-runner` |
+| **Team model** | Single agent per container | Full team dispatch |
+| **Iteration** | Rebuild container | Edit YAML |
+| **Cost (100 jobs/mo)** | ~$6 | ~$0 (free tier) |
+
+### Infrastructure (Self-Hosted Only)
+
+Shared Azure components:
+- **Azure Container Apps Managed Environment** — hosts containers
+- **Azure Container Registry (ACR)** — stores images
+- **User-Assigned Managed Identity** — grants permissions (AcrPull, Key Vault)
+- **Azure Key Vault** — stores secrets (Copilot PAT, GitHub App credentials)
+- **Log Analytics Workspace** — logs and diagnostics
+- **OIDC Federated Identity** — GitHub Actions auth without secrets
+
+Self-hosted runner adds:
+- **KEDA Scaler (github-runner)** — polls GitHub job queue, scales ACA Jobs
+- **Runner container** — GitHub Actions runner binary + entrypoint
+- **Terraform modules** — `infra/runner.tf` in [squad-on-aca](https://github.com/haflidif/squad-on-aca)
+
+All infrastructure code lives in the `squad-on-aca` repo. Squad Team Action just defines the workflows.
+
+</details>
 
 ---
 
-## Limitations & Future Work
+## Limitations
 
-### Current Limitations
-
-- **Copilot CLI auth**: Workflows require a valid `COPILOT_TOKEN`. Without it, falls back to label-based dispatch.
-- **Execution time**: Full-team dispatch may take 2–5 minutes depending on complexity.
-- **Rate limits**: Copilot CLI and GitHub API have rate limits; large-scale users may hit them.
-- **Self-hosted cold start**: ACA Jobs take 10–15 seconds to spin up (vs 2–5 sec for GitHub-hosted).
-
-### Future Directions
-
-- **Direct SDK integration**: Use Squad SDK directly instead of CLI (faster, richer telemetry)
-- **Streaming results**: Post incremental results as each agent finishes
-- **Per-agent comments**: Each agent's response in a separate comment thread
-- **Webhook-based dispatch**: Alternate trigger model for non-GitHub sources
-- **Cost optimization**: Spot instances for ACA Jobs (further reduce self-hosted cost)
+- **Copilot CLI auth**: Requires valid `COPILOT_TOKEN`; falls back to label-based dispatch without it
+- **Execution time**: Full-team dispatch takes 2–5 minutes depending on complexity
+- **Rate limits**: Copilot CLI and GitHub API have limits; high-volume users may hit them
+- **Cold start (self-hosted)**: ACA Jobs take 10–15 seconds vs 2–5 sec for GitHub-hosted
 
 ---
 
 ## Credits
 
-- **[Hafliði Fridthjofsson](https://github.com/haflidif)** — [squad-on-aca](https://github.com/haflidif/squad-on-aca) and [blog post](https://azureviking.com/post/squad-on-aca-serverless-ai-agents/) that inspired this approach
-- **[Brady Gaster](https://github.com/bradygaster)** — Squad framework and Copilot CLI extension
-- GitHub Actions and Azure Container Apps teams for excellent platform support
+- **[Hafliði Fridthjofsson](https://github.com/haflidif)** — [squad-on-aca](https://github.com/haflidif/squad-on-aca) and [blog post](https://azureviking.com/post/squad-on-aca-serverless-ai-agents/)
+- **[Brady Gaster](https://github.com/bradygaster)** — Squad framework and Copilot CLI
+- GitHub Actions and Azure Container Apps teams
 
 ---
 

@@ -21,7 +21,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
 
@@ -32,47 +33,49 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.COPILOT_TOKEN }}
         run: |
-          # Install GitHub CLI if not present
-          if ! command -v gh &> /dev/null; then
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
-              https://cli.github.com/packages stable main" \
-              | sudo tee /etc/apt/sources.list.d/github-cli-stable.list > /dev/null
-            sudo apt update && sudo apt install gh -y
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::COPILOT_TOKEN not set — Copilot CLI will be unavailable. Falling back to label-dispatch mode."
+            exit 0
           fi
-          # Auth with provided token
           echo "$GH_TOKEN" | gh auth login --with-token
-          # Install Copilot extension
           gh extension install github/gh-copilot || true
 
       - name: Determine issue number
         id: issue
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+          EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "number=${{ github.event.inputs.issue_number }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "number=${INPUT_ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
           else
-            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            echo "number=${EVENT_ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Fetch issue details
         id: details
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
         run: |
-          ISSUE_JSON=$(gh issue view "${{ steps.issue.outputs.number }}" --json title,body,labels,comments)
+          ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json title,body,labels,comments)
           ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
           ISSUE_BODY=$(echo "$ISSUE_JSON" | jq -r '.body // "No description provided"')
-          echo "title<<EOF" >> "$GITHUB_OUTPUT"
+
+          echo "title<<GHEOF" >> "$GITHUB_OUTPUT"
           echo "$ISSUE_TITLE" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "GHEOF" >> "$GITHUB_OUTPUT"
+
+          # Write body to file — avoids multiline GITHUB_OUTPUT issues
           echo "$ISSUE_BODY" > issue-body.txt
 
       - name: Post processing comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
         run: |
-          gh issue comment "${{ steps.issue.outputs.number }}" --body "### 🚀 Squad Full-Team Dispatch
+          gh issue comment "$ISSUE_NUMBER" --body "### 🚀 Squad Full-Team Dispatch
 
           **Ralph** is spinning up the full squad to work on this issue.
 
@@ -87,13 +90,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.COPILOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          ISSUE_TITLE: ${{ steps.details.outputs.title }}
         run: |
-          ISSUE_NUM="${{ steps.issue.outputs.number }}"
-          ISSUE_TITLE="${{ steps.details.outputs.title }}"
           ISSUE_BODY=$(cat issue-body.txt)
 
           # Build the prompt for Squad full-team dispatch
-          PROMPT="Team, work on issue #${ISSUE_NUM}: ${ISSUE_TITLE}
+          PROMPT="Team, work on issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
 
           Issue description:
           ${ISSUE_BODY}
@@ -105,24 +108,25 @@ jobs:
 
           Post your consolidated analysis."
 
-          # Run via Copilot CLI with Squad agent
-          echo "$PROMPT" | gh copilot suggest --target shell 2>&1 | tee squad-output.txt || true
+          # TODO: The gh-copilot extension does not support non-interactive piped
+          # input. When a batch/programmatic API becomes available, replace this
+          # block with the correct invocation. For now, skip straight to fallback.
+          # Ref: https://github.com/github/gh-copilot --help
+          touch squad-output.txt
 
-          # Fallback: if Copilot CLI produced no output, use label-dispatch mode
+          # Fallback: use label-dispatch mode to fan out to individual agents
           if [ ! -s squad-output.txt ]; then
-            echo "Copilot CLI not available, using label-dispatch mode..."
+            echo "Using label-dispatch mode — adding squad:{member} labels..."
 
-            # Read team.md to get member list
             TEAM_FILE=".squad/team.md"
             if [ ! -f "$TEAM_FILE" ]; then
               TEAM_FILE=".ai-team/team.md"
             fi
 
-            # Create structured dispatch message
             cat > squad-output.txt << 'DISPATCH_EOF'
           Squad full-team dispatch initiated. Each agent will analyze the issue from their role's perspective.
 
-          **Note:** For full AI-powered analysis, configure the `COPILOT_TOKEN` secret with a PAT that has Copilot access. Currently running in label-dispatch mode — adding `squad:{member}` labels for each team member.
+          **Note:** Running in label-dispatch mode — adding `squad:{member}` labels for each team member. To enable full AI-powered analysis, configure the `COPILOT_TOKEN` secret with a PAT that has Copilot access.
           DISPATCH_EOF
 
             # Parse team members from the markdown table and add labels
@@ -135,7 +139,9 @@ jobs:
                   if [ -n "$MEMBER" ]; then
                     SLUG=$(echo "$MEMBER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/^-//;s/-$//')
                     echo "Adding label squad:${SLUG} for ${MEMBER}"
-                    gh issue edit "$ISSUE_NUM" --add-label "squad:${SLUG}" 2>/dev/null || true
+                    # Create label if it doesn't exist, then apply it
+                    gh label create "squad:${SLUG}" --color "0E8A16" --description "Squad member: ${MEMBER}" 2>/dev/null || true
+                    gh issue edit "$ISSUE_NUMBER" --add-label "squad:${SLUG}" || true
                   fi
                 done
             fi
@@ -144,12 +150,14 @@ jobs:
       - name: Post results comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           RESULTS=$(cat squad-output.txt 2>/dev/null || echo "No output captured")
-          gh issue comment "${{ steps.issue.outputs.number }}" --body "### ✅ Squad Full-Team Analysis Complete
+          gh issue comment "$ISSUE_NUMBER" --body "### ✅ Squad Full-Team Analysis Complete
 
           ${RESULTS}
 
           ---
           > 🤖 Processed by Squad Autonomous GitHub Action
-          > Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          > Workflow run: ${RUN_URL}"
