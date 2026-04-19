@@ -1,0 +1,81 @@
+name: Squad Triage
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    if: github.event.label.name == 'squad'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch issue details
+        id: details
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_JSON=$(gh issue view "${{ github.event.issue.number }}" --json title,body,labels)
+          TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+          BODY=$(echo "$ISSUE_JSON" | jq -r '.body // ""')
+          COMBINED="${TITLE} ${BODY}"
+          echo "text=${COMBINED}" >> "$GITHUB_OUTPUT"
+
+      - name: Route to team member
+        id: route
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TEXT="${{ steps.details.outputs.text }}"
+          TEXT_LOWER=$(echo "$TEXT" | tr '[:upper:]' '[:lower:]')
+          ISSUE_NUM="${{ github.event.issue.number }}"
+          ROUTED=""
+
+          # Read routing rules from .squad/routing.md patterns
+          # Bug/fix/error → Tester
+          if echo "$TEXT_LOWER" | grep -qE '(bug|fix|error|crash|regression|broken)'; then
+            ROUTED="tester"
+          # Security → Reviewer
+          elif echo "$TEXT_LOWER" | grep -qE '(security|auth|vulnerability|exploit|cve|permission)'; then
+            ROUTED="reviewer"
+          # Feature/implement → Developer
+          elif echo "$TEXT_LOWER" | grep -qE '(feature|implement|add|create|build|enhance)'; then
+            ROUTED="developer"
+          # Research/investigate → Researcher
+          elif echo "$TEXT_LOWER" | grep -qE '(research|investigate|explore|analyze|study|evaluate)'; then
+            ROUTED="researcher"
+          # Architecture/design → Lead
+          elif echo "$TEXT_LOWER" | grep -qE '(architecture|design|refactor|restructure|migrate|scale)'; then
+            ROUTED="lead"
+          else
+            # Default: escalate to lead
+            ROUTED="lead"
+          fi
+
+          echo "member=${ROUTED}" >> "$GITHUB_OUTPUT"
+          echo "Routed to: ${ROUTED}"
+
+      - name: Apply member label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MEMBER="${{ steps.route.outputs.member }}"
+          ISSUE_NUM="${{ github.event.issue.number }}"
+          gh issue edit "$ISSUE_NUM" --add-label "squad:${MEMBER}" 2>/dev/null || \
+            gh label create "squad:${MEMBER}" --color "0E8A16" --description "Squad member: ${MEMBER}" && \
+            gh issue edit "$ISSUE_NUM" --add-label "squad:${MEMBER}"
+
+      - name: Post triage comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MEMBER="${{ steps.route.outputs.member }}"
+          gh issue comment "${{ github.event.issue.number }}" --body "### 🏷️ Squad Triage
+
+          This issue has been routed to **${MEMBER}** based on keyword analysis.
+
+          Label \`squad:${MEMBER}\` has been applied."

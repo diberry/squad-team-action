@@ -1,0 +1,155 @@
+name: Squad Full-Team Dispatch
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to process'
+        required: true
+
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  dispatch:
+    if: github.event.label.name == 'squad' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Squad CLI
+        run: npm install -g @bradygaster/squad-cli
+
+      - name: Set up GitHub Copilot CLI
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_TOKEN }}
+        run: |
+          # Install GitHub CLI if not present
+          if ! command -v gh &> /dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+              https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli-stable.list > /dev/null
+            sudo apt update && sudo apt install gh -y
+          fi
+          # Auth with provided token
+          echo "$GH_TOKEN" | gh auth login --with-token
+          # Install Copilot extension
+          gh extension install github/gh-copilot || true
+
+      - name: Determine issue number
+        id: issue
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=${{ github.event.inputs.issue_number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch issue details
+        id: details
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_JSON=$(gh issue view "${{ steps.issue.outputs.number }}" --json title,body,labels,comments)
+          ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+          ISSUE_BODY=$(echo "$ISSUE_JSON" | jq -r '.body // "No description provided"')
+          echo "title<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$ISSUE_TITLE" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "$ISSUE_BODY" > issue-body.txt
+
+      - name: Post processing comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "${{ steps.issue.outputs.number }}" --body "### 🚀 Squad Full-Team Dispatch
+
+          **Ralph** is spinning up the full squad to work on this issue.
+
+          | Agent | Status |
+          |-------|--------|
+          | All team members | ⏳ Processing... |
+
+          > This may take a few minutes. Results will be posted below."
+
+      - name: Run Squad full-team dispatch
+        id: squad
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUM="${{ steps.issue.outputs.number }}"
+          ISSUE_TITLE="${{ steps.details.outputs.title }}"
+          ISSUE_BODY=$(cat issue-body.txt)
+
+          # Build the prompt for Squad full-team dispatch
+          PROMPT="Team, work on issue #${ISSUE_NUM}: ${ISSUE_TITLE}
+
+          Issue description:
+          ${ISSUE_BODY}
+
+          Each team member should analyze this from their role's perspective and provide:
+          1. Their assessment
+          2. Recommended actions
+          3. Any concerns or risks
+
+          Post your consolidated analysis."
+
+          # Run via Copilot CLI with Squad agent
+          echo "$PROMPT" | gh copilot suggest --target shell 2>&1 | tee squad-output.txt || true
+
+          # Fallback: if Copilot CLI produced no output, use label-dispatch mode
+          if [ ! -s squad-output.txt ]; then
+            echo "Copilot CLI not available, using label-dispatch mode..."
+
+            # Read team.md to get member list
+            TEAM_FILE=".squad/team.md"
+            if [ ! -f "$TEAM_FILE" ]; then
+              TEAM_FILE=".ai-team/team.md"
+            fi
+
+            # Create structured dispatch message
+            cat > squad-output.txt << 'DISPATCH_EOF'
+          Squad full-team dispatch initiated. Each agent will analyze the issue from their role's perspective.
+
+          **Note:** For full AI-powered analysis, configure the `COPILOT_TOKEN` secret with a PAT that has Copilot access. Currently running in label-dispatch mode — adding `squad:{member}` labels for each team member.
+          DISPATCH_EOF
+
+            # Parse team members from the markdown table and add labels
+            if [ -f "$TEAM_FILE" ]; then
+              grep -E '^\|[^|]+\|[^|]+\|' "$TEAM_FILE" | \
+                grep -v -E '(---|Name|Scribe|Ralph)' | \
+                awk -F'|' '{print $2}' | \
+                sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
+                while read -r MEMBER; do
+                  if [ -n "$MEMBER" ]; then
+                    SLUG=$(echo "$MEMBER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/^-//;s/-$//')
+                    echo "Adding label squad:${SLUG} for ${MEMBER}"
+                    gh issue edit "$ISSUE_NUM" --add-label "squad:${SLUG}" 2>/dev/null || true
+                  fi
+                done
+            fi
+          fi
+
+      - name: Post results comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RESULTS=$(cat squad-output.txt 2>/dev/null || echo "No output captured")
+          gh issue comment "${{ steps.issue.outputs.number }}" --body "### ✅ Squad Full-Team Analysis Complete
+
+          ${RESULTS}
+
+          ---
+          > 🤖 Processed by Squad Autonomous GitHub Action
+          > Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
